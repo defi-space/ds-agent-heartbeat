@@ -1,11 +1,17 @@
 import { request, gql } from 'graphql-request';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, doc, getDoc } from 'firebase/firestore';
+import { App } from '@slack/bolt';
 import cron from 'node-cron';
 import fetch from 'node-fetch';
 
 const SLACK_WEBHOOK = process.env["SLACK_WEBHOOK"] || "";
+const SLACK_BOT_TOKEN = process.env["SLACK_BOT_TOKEN"] || "";
+const SLACK_APP_TOKEN = process.env["SLACK_APP_TOKEN"] || "";
 const GRAPHQL_ENDPOINT = 'https://qip.systems/v1/graphql';
+
+// Store monitored sessions
+let monitoredSessions = new Set<string>();
 
 const firebaseConfig = {
   apiKey: process.env["FIREBASE_API_KEY"] || "",
@@ -20,9 +26,16 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
+// Initialize Slack app with Socket Mode
+const slackApp = new App({
+  token: SLACK_BOT_TOKEN,
+  appToken: SLACK_APP_TOKEN,
+  socketMode: true,
+});
+
 const AGENT_INFO_QUERY = gql`
-  query AgentInfo {
-    agent {
+  query AgentInfo($sessionIds: [Int!]!) {
+    agent(where: {session: {gameSessionIndex: {_in: $sessionIds}}}) {
       agentIndex
       session {
         gameFactory
@@ -41,6 +54,36 @@ interface AgentInfoResponse {
     };
   }>;
 }
+
+// Slack command handlers
+slackApp.command('/monitor', async ({ command, ack, respond }) => {
+  await ack();
+  
+  const args = command.text.trim().split(' ');
+  const action = args[0];
+  
+  if (action === 'add' && args[1]) {
+    const sessionId = args[1];
+    monitoredSessions.add(sessionId);
+    await respond(`✅ Now monitoring session ${sessionId}. Currently monitoring: ${Array.from(monitoredSessions).join(', ')}`);
+  } else if (action === 'remove' && args[1]) {
+    const sessionId = args[1];
+    monitoredSessions.delete(sessionId);
+    await respond(`❌ Stopped monitoring session ${sessionId}. Currently monitoring: ${Array.from(monitoredSessions).join(', ')}`);
+  } else if (action === 'list') {
+    const sessions = Array.from(monitoredSessions);
+    await respond(sessions.length > 0 ? `📋 Currently monitoring sessions: ${sessions.join(', ')}` : '📋 No sessions being monitored');
+  } else if (action === 'clear') {
+    monitoredSessions.clear();
+    await respond('🗑️ Cleared all monitored sessions');
+  } else {
+    await respond(`Usage:
+• \`/monitor add <session-id>\` - Add a session to monitor
+• \`/monitor remove <session-id>\` - Remove a session from monitoring
+• \`/monitor list\` - List all monitored sessions
+• \`/monitor clear\` - Clear all monitored sessions`);
+  }
+});
 
 async function getAgentThoughts(agentIndex: number, gameSessionId: string, gameFactory: string) {
   const collectionName = `f_${gameFactory.slice(-5)}_s_${gameSessionId}_a_${agentIndex + 1}`;
@@ -79,12 +122,21 @@ async function notifySlack(message: string) {
 
 async function checkAgents() {
   try {
-    console.log('[Heartbeat] Fetching agent info from GraphQL...');
-    const data = await request<AgentInfoResponse>(GRAPHQL_ENDPOINT, AGENT_INFO_QUERY);
+    if (monitoredSessions.size === 0) {
+      console.log('[Heartbeat] No sessions being monitored. Use /monitor add <session-id> to start monitoring.');
+      return;
+    }
+
+    const sessionIds = Array.from(monitoredSessions).map(id => parseInt(id));
+    console.log(`[Heartbeat] Fetching agent info for sessions: ${sessionIds.join(', ')}`);
+    
+    const data = await request<AgentInfoResponse>(GRAPHQL_ENDPOINT, AGENT_INFO_QUERY, { sessionIds });
     const agents = data.agent;
-    console.log(`[Heartbeat] Found ${agents.length} agents.`);
+    console.log(`[Heartbeat] Found ${agents.length} agents in monitored sessions.`);
+    
     const now = Date.now();
     const downAgents: { agentId: number, sessionId: string, downtime: number }[] = [];
+    
     for (const agent of agents) {
       console.log(`[Heartbeat] Checking agent-${agent.agentIndex} in session ${agent.session.gameSessionIndex}...`);
       const thought = await getAgentThoughts(agent.agentIndex, agent.session.gameSessionIndex.toString(), agent.session.gameFactory);
@@ -99,6 +151,7 @@ async function checkAgents() {
         console.log(`[Heartbeat] Agent-${agent.agentIndex} in session ${agent.session.gameSessionIndex} is healthy.`);
       }
     }
+    
     if (downAgents.length > 0) {
       // Group agents by session
       type AgentGroup = { agentId: number; sessionId: string; downtime: number }[];
@@ -123,7 +176,7 @@ async function checkAgents() {
           .join('\n\n');
       await notifySlack(msg);
     } else {
-      console.log('[Heartbeat] All agents are healthy.');
+      console.log('[Heartbeat] All monitored agents are healthy.');
     }
   } catch (err) {
     console.error('[Heartbeat] Error checking agents:', err);
@@ -139,6 +192,13 @@ if (isTestMode) {
     process.exit(0);
   });
 } else {
+  // Start Slack app in Socket Mode
+  (async () => {
+    await slackApp.start();
+    console.log('⚡️ Slack bot is running in Socket Mode!');
+  })();
+
+  // Start cron job
   cron.schedule('*/5 * * * *', checkAgents);
-  console.log('Agent heartbeat service started.');
+  console.log('Agent heartbeat service started. Use /monitor commands to control which sessions to monitor.');
 }
