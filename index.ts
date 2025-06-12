@@ -24,32 +24,42 @@ const AGENT_INFO_QUERY = gql`
   query AgentInfo {
     agent {
       agentIndex
-      sessionId
       session {
         gameFactory
+        gameSessionIndex
       }
     }
   }
 `;
 
+interface AgentInfoResponse {
+  agent: Array<{
+    agentIndex: number;
+    session: {
+      gameFactory: string;
+      gameSessionIndex: number;
+    };
+  }>;
+}
+
 async function getAgentThoughts(agentIndex: number, gameSessionId: string, gameFactory: string) {
-  const collectionName = `f_${gameFactory.slice(-5)}_s_${gameSessionId}_a_${agentIndex}`;
-  console.log(`[Firestore] Checking collection: ${collectionName}, doc: working-memory:cli:agent-${agentIndex}`);
-  const docRef = doc(db, collectionName, `working-memory:cli:agent-${agentIndex}`);
+  const collectionName = `f_${gameFactory.slice(-5)}_s_${gameSessionId}_a_${agentIndex + 1}`;
+  console.log(`[Firestore] Checking collection: ${collectionName}, doc: working-memory:cli:agent-${agentIndex + 1}`);
+  const docRef = doc(db, collectionName, `working-memory:cli:agent-${agentIndex + 1}`);
   const docSnap = await getDoc(docRef);
   if (!docSnap.exists()) {
-    console.warn(`[Firestore] No document found for agent-${agentIndex} in session ${gameSessionId}`);
+    console.warn(`[Firestore] No document found for agent-${agentIndex + 1} in session ${gameSessionId}`);
     return undefined;
   }
   const data = docSnap.data();
   const workingMemory = data["value"];
   if (!workingMemory || !Array.isArray(workingMemory.thoughts)) {
-    console.warn(`[Firestore] No thoughts array for agent-${agentIndex} in session ${gameSessionId}`);
+    console.warn(`[Firestore] No thoughts array for agent-${agentIndex + 1} in session ${gameSessionId}`);
     return undefined;
   }
   const latest = workingMemory.thoughts.sort((a: any, b: any) => b.timestamp - a.timestamp)[0];
   if (latest) {
-    console.log(`[Firestore] Latest thought for agent-${agentIndex} in session ${gameSessionId}: timestamp ${latest.timestamp}`);
+    console.log(`[Firestore] Latest thought for agent-${agentIndex + 1} in session ${gameSessionId}: timestamp ${latest.timestamp}`);
   }
   return latest;
 }
@@ -70,27 +80,47 @@ async function notifySlack(message: string) {
 async function checkAgents() {
   try {
     console.log('[Heartbeat] Fetching agent info from GraphQL...');
-    const data = await request(GRAPHQL_ENDPOINT, AGENT_INFO_QUERY);
+    const data = await request<AgentInfoResponse>(GRAPHQL_ENDPOINT, AGENT_INFO_QUERY);
     const agents = data.agent;
     console.log(`[Heartbeat] Found ${agents.length} agents.`);
     const now = Date.now();
-    const downAgents: { agentId: number, sessionId: string }[] = [];
+    const downAgents: { agentId: number, sessionId: string, downtime: number }[] = [];
     for (const agent of agents) {
-      console.log(`[Heartbeat] Checking agent-${agent.agentIndex} in session ${agent.sessionId}...`);
-      const thought = await getAgentThoughts(agent.agentIndex, agent.sessionId, agent.session.gameFactory);
+      console.log(`[Heartbeat] Checking agent-${agent.agentIndex} in session ${agent.session.gameSessionIndex}...`);
+      const thought = await getAgentThoughts(agent.agentIndex, agent.session.gameSessionIndex.toString(), agent.session.gameFactory);
       if (!thought || !thought.timestamp) {
-        console.warn(`[Heartbeat] No recent thought for agent-${agent.agentIndex} in session ${agent.sessionId}`);
-        downAgents.push({ agentId: agent.agentIndex, sessionId: agent.sessionId });
+        console.warn(`[Heartbeat] No recent thought for agent-${agent.agentIndex} in session ${agent.session.gameSessionIndex}`);
+        downAgents.push({ agentId: agent.agentIndex, sessionId: agent.session.gameSessionIndex.toString(), downtime: -1 });
       } else if (now - thought.timestamp > 10 * 60 * 1000) {
-        console.warn(`[Heartbeat] Agent-${agent.agentIndex} in session ${agent.sessionId} is down (last update ${(now - thought.timestamp) / 60000} min ago)`);
-        downAgents.push({ agentId: agent.agentIndex, sessionId: agent.sessionId });
+        const downtime = Math.floor((now - thought.timestamp) / 60000);
+        console.warn(`[Heartbeat] Agent-${agent.agentIndex} in session ${agent.session.gameSessionIndex} is down (last update ${downtime} min ago)`);
+        downAgents.push({ agentId: agent.agentIndex, sessionId: agent.session.gameSessionIndex.toString(), downtime });
       } else {
-        console.log(`[Heartbeat] Agent-${agent.agentIndex} in session ${agent.sessionId} is healthy.`);
+        console.log(`[Heartbeat] Agent-${agent.agentIndex} in session ${agent.session.gameSessionIndex} is healthy.`);
       }
     }
     if (downAgents.length > 0) {
-      const msg = `<!channel> The following agents are down: \n` +
-        downAgents.map(a => `agent-${a.agentId} on game session ${a.sessionId}`).join('\n');
+      // Group agents by session
+      type AgentGroup = { agentId: number; sessionId: string; downtime: number }[];
+      const agentsBySession = downAgents.reduce<Record<string, AgentGroup>>((acc, agent) => {
+        const sessionId = agent.sessionId;
+        acc[sessionId] = acc[sessionId] || [];
+        acc[sessionId].push(agent);
+        return acc;
+      }, {});
+
+      const msg = `*:: <!channel> → AGENT ALERT ::*\n\n` +
+        Object.entries(agentsBySession)
+          .sort(([sessionA], [sessionB]) => parseInt(sessionA) - parseInt(sessionB))
+          .map(([sessionId, agents]) => {
+            const sessionHeader = `*[session-${sessionId}]*`;
+            const agentsList = agents
+              .sort((a, b) => a.agentId - b.agentId)
+              .map(a => `⟲ [agent-${a.agentId + 1}]${a.downtime === -1 ? ' :: no data available' : ` :: down for ${a.downtime} minutes`}`)
+              .join('\n');
+            return `${sessionHeader}\n${agentsList}`;
+          })
+          .join('\n\n');
       await notifySlack(msg);
     } else {
       console.log('[Heartbeat] All agents are healthy.');
@@ -100,6 +130,15 @@ async function checkAgents() {
   }
 }
 
-cron.schedule('*/5 * * * *', checkAgents);
+const isTestMode = process.argv.includes('--test');
 
-console.log('Agent heartbeat service started.');
+if (isTestMode) {
+  console.log('Running in test mode - executing single check...');
+  checkAgents().then(() => {
+    console.log('Test check completed.');
+    process.exit(0);
+  });
+} else {
+  cron.schedule('*/5 * * * *', checkAgents);
+  console.log('Agent heartbeat service started.');
+}
