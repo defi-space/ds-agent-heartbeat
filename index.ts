@@ -23,7 +23,6 @@ const db = getFirestore(app);
 const AGENT_INFO_QUERY = gql`
   query AgentInfo {
     agent {
-      id
       agentIndex
       sessionId
       session {
