@@ -20,7 +20,7 @@ bun run start
 
 ## Environment Variables
 
-Create a `.env` file in the root with the following keys:
+Copy the provided `.env.example` to `.env` and fill out the values:
 
 ```
 FIREBASE_API_KEY=your_api_key
