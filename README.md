@@ -12,11 +12,40 @@ To run:
 bun run start
 ```
 
+To run a single test check (without scheduling):
+
+```bash
+bun run start --test
+```
+
 ## What this service does
 
 - Every 5 minutes, checks all agents in all game sessions (from the indexer GraphQL endpoint).
 - For each agent, checks the latest Firestore "thought" timestamp.
-- If any agent has not updated in 10+ minutes, notifies <!channel> on Slack with the agent and session info.
+- If any agent has not updated in 10+ minutes, notifies <!channel> on Slack with detailed information including:
+  - Agent ID and session information
+  - How long each agent has been down
+  - Agents grouped by session for better readability
+
+## Slack Notification Format
+
+When agents are down, the service sends a formatted Slack message like:
+
+```
+:: <!channel> → AGENT ALERT ::
+
+[session-0]
+⟲ [agent-1] :: no data available
+⟲ [agent-2] :: down for 15 minutes
+
+[session-1]
+⟲ [agent-1] :: down for 30 minutes
+⟲ [agent-3] :: down for 45 minutes
+```
+
+## Command Line Options
+
+- `--test`: Run a single check and exit (useful for testing without starting the cron scheduler)
 
 ## Environment Variables
 
