@@ -45,6 +45,14 @@ const AGENT_INFO_QUERY = gql`
   }
 `;
 
+const GAME_SESSION_QUERY = gql`
+  query GameSessions {
+    gameSession {
+      address
+    }
+  }
+`;
+
 interface AgentInfoResponse {
   agent: Array<{
     agentIndex: number;
@@ -53,6 +61,24 @@ interface AgentInfoResponse {
       gameSessionIndex: number;
     };
   }>;
+}
+
+interface GameSessionResponse {
+  gameSession: Array<{
+    address: string;
+  }>;
+}
+
+// Function to check if a game session index exists
+async function validateGameSessionExists(sessionIndex: number): Promise<boolean> {
+  try {
+    const data = await request<GameSessionResponse>(GRAPHQL_ENDPOINT, GAME_SESSION_QUERY);
+    const maxIndex = data.gameSession.length - 1;
+    return sessionIndex >= 0 && sessionIndex <= maxIndex;
+  } catch (error) {
+    console.error('[Validation] Error checking game session existence:', error);
+    return false;
+  }
 }
 
 // Slack command handlers
@@ -64,24 +90,52 @@ slackApp.command('/monitor', async ({ command, ack, respond }) => {
   
   if (action === 'add' && args[1]) {
     const sessionId = args[1];
+    const sessionIndex = parseInt(sessionId);
+    
+    if (isNaN(sessionIndex)) {
+      await respond(`*:: INVALID SESSION ::*\n\n⟲ session id must be a number`);
+      return;
+    }
+    
+    if (monitoredSessions.has(sessionId)) {
+      await respond(`*:: SESSION ALREADY MONITORED ::*\n\n⟲ [session-${sessionId}] :: already being monitored`);
+      return;
+    }
+    
+    // Check if the game session exists
+    const sessionExists = await validateGameSessionExists(sessionIndex);
+    if (!sessionExists) {
+      await respond(`*:: SESSION NOT FOUND ::*\n\n⟲ [session-${sessionId}] :: does not exist in the indexer`);
+      return;
+    }
+    
     monitoredSessions.add(sessionId);
-    await respond(`✅ Now monitoring session ${sessionId}. Currently monitoring: ${Array.from(monitoredSessions).join(', ')}`);
+    const sessions = Array.from(monitoredSessions).sort((a, b) => parseInt(a) - parseInt(b));
+    await respond(`*:: SESSION ADDED ::*\n\n⟲ [session-${sessionId}] :: now monitoring\n\n*currently monitoring:* ${sessions.map(s => `[session-${s}]`).join(', ')}`);
   } else if (action === 'remove' && args[1]) {
     const sessionId = args[1];
+    
+    if (!monitoredSessions.has(sessionId)) {
+      await respond(`*:: SESSION NOT MONITORED ::*\n\n⟲ [session-${sessionId}] :: not currently being monitored`);
+      return;
+    }
+    
     monitoredSessions.delete(sessionId);
-    await respond(`❌ Stopped monitoring session ${sessionId}. Currently monitoring: ${Array.from(monitoredSessions).join(', ')}`);
+    const sessions = Array.from(monitoredSessions).sort((a, b) => parseInt(a) - parseInt(b));
+    await respond(`*:: SESSION REMOVED ::*\n\n⟲ [session-${sessionId}] :: stopped monitoring\n\n*currently monitoring:* ${sessions.length > 0 ? sessions.map(s => `[session-${s}]`).join(', ') : 'none'}`);
   } else if (action === 'list') {
-    const sessions = Array.from(monitoredSessions);
-    await respond(sessions.length > 0 ? `📋 Currently monitoring sessions: ${sessions.join(', ')}` : '📋 No sessions being monitored');
+    const sessions = Array.from(monitoredSessions).sort((a, b) => parseInt(a) - parseInt(b));
+    if (sessions.length > 0) {
+      const sessionsList = sessions.map(s => `⟲ [session-${s}] :: monitoring active`).join('\n');
+      await respond(`*:: MONITORED SESSIONS ::*\n\n${sessionsList}`);
+    } else {
+      await respond(`*:: MONITORED SESSIONS ::*\n\n⟲ no sessions currently monitored`);
+    }
   } else if (action === 'clear') {
     monitoredSessions.clear();
-    await respond('🗑️ Cleared all monitored sessions');
+    await respond('*:: SESSIONS CLEARED ::*\n\n⟲ all monitoring stopped');
   } else {
-    await respond(`Usage:
-• \`/monitor add <session-id>\` - Add a session to monitor
-• \`/monitor remove <session-id>\` - Remove a session from monitoring
-• \`/monitor list\` - List all monitored sessions
-• \`/monitor clear\` - Clear all monitored sessions`);
+    await respond(`*:: MONITOR COMMANDS ::*\n\n⟲ \`/monitor add <session-id>\` :: add session to monitor\n⟲ \`/monitor remove <session-id>\` :: remove session from monitoring\n⟲ \`/monitor list\` :: show all monitored sessions\n⟲ \`/monitor clear\` :: clear all monitored sessions`);
   }
 });
 

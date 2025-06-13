@@ -1,6 +1,6 @@
 # ds-agent-heartbeat
 
-Interactive Slack bot for monitoring specific game session agents using Socket Mode.
+Interactive Slack bot for monitoring specific game session agents using Socket Mode with built-in validation.
 
 To install dependencies:
 
@@ -34,7 +34,7 @@ bun run start --test
 
 Use these commands in your Slack channel:
 
-- `/monitor add <session-id>` - Add a session to monitor
+- `/monitor add <session-id>` - Add a session to monitor (validates existence first)
 - `/monitor remove <session-id>` - Remove a session from monitoring  
 - `/monitor list` - List all currently monitored sessions
 - `/monitor clear` - Clear all monitored sessions
@@ -47,23 +47,6 @@ Use these commands in your Slack channel:
 /monitor remove 123
 /monitor clear
 ```
-
-## Slack Notification Format
-
-When agents are down, the service sends a formatted Slack message like:
-
-```
-:: <!channel> → AGENT ALERT ::
-
-[session-0]
-⟲ [agent-1] :: no data available
-⟲ [agent-2] :: down for 15 minutes
-
-[session-1]
-⟲ [agent-1] :: down for 30 minutes
-⟲ [agent-3] :: down for 45 minutes
-```
-
 ## Command Line Options
 
 - `--test`: Run a single check and exit (useful for testing without starting the cron scheduler)
@@ -87,27 +70,3 @@ SLACK_WEBHOOK=your_slack_webhook_url
 SLACK_BOT_TOKEN=xoxb-your-bot-token
 SLACK_APP_TOKEN=xapp-your-app-level-token
 ```
-
-## Setup Instructions
-
-1. Create a Slack app at https://api.slack.com/apps
-2. **Enable Socket Mode**:
-   - Go to "Socket Mode" in your app settings
-   - Toggle "Enable Socket Mode" to On
-3. **Generate App-Level Token**:
-   - Create an app-level token with `connections:write` scope
-   - Copy this token as your `SLACK_APP_TOKEN`
-4. Add the following OAuth scopes to your bot:
-   - `commands` (for slash commands)
-   - `chat:write` (for sending messages)
-5. Create a slash command `/monitor` (the Request URL can be anything since we're using Socket Mode)
-6. Install the app to your workspace
-7. Copy the Bot User OAuth Token as your `SLACK_BOT_TOKEN`
-8. Set up your environment variables in `.env`
-
-## Socket Mode Benefits
-
-- No need to expose a public endpoint
-- Perfect for development and testing
-- Real-time WebSocket connection with Slack
-- Simplified deployment without webhook URLs
